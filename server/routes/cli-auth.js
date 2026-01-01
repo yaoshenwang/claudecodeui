@@ -75,6 +75,38 @@ router.get('/codex/status', async (req, res) => {
 });
 
 async function checkClaudeCredentials() {
+  // First check for API key in environment variables
+  const envApiKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN;
+  if (envApiKey) {
+    const baseUrl = process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+    return {
+      authenticated: true,
+      email: `API Key (${baseUrl})`,
+      method: 'api_key_env'
+    };
+  }
+
+  // Check for API key in Claude settings.json (set by cc-switch)
+  try {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    const settingsContent = await fs.readFile(settingsPath, 'utf8');
+    const settings = JSON.parse(settingsContent);
+
+    if (settings.env && (settings.env.ANTHROPIC_API_KEY || settings.env.ANTHROPIC_AUTH_TOKEN)) {
+      const baseUrl = settings.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
+      // Also update process.env for immediate use
+      Object.assign(process.env, settings.env);
+      return {
+        authenticated: true,
+        email: `API Key (${baseUrl})`,
+        method: 'api_key_settings'
+      };
+    }
+  } catch (error) {
+    // Settings file might not exist, continue to check OAuth
+  }
+
+  // Then check OAuth credentials file
   try {
     const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
     const content = await fs.readFile(credPath, 'utf8');
@@ -87,7 +119,8 @@ async function checkClaudeCredentials() {
       if (!isExpired) {
         return {
           authenticated: true,
-          email: creds.email || creds.user || null
+          email: creds.email || creds.user || null,
+          method: 'oauth'
         };
       }
     }

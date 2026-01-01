@@ -18,6 +18,7 @@ import AgentListItem from './settings/AgentListItem';
 import AccountContent from './settings/AccountContent';
 import PermissionsContent from './settings/PermissionsContent';
 import McpServersContent from './settings/McpServersContent';
+import ProviderSwitchContent from './settings/ProviderSwitchContent';
 
 function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
   const { isDarkMode, toggleDarkMode } = useTheme();
@@ -56,7 +57,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [jsonValidationError, setJsonValidationError] = useState('');
   const [selectedAgent, setSelectedAgent] = useState('claude'); // 'claude', 'cursor', or 'codex'
-  const [selectedCategory, setSelectedCategory] = useState('account'); // 'account', 'permissions', or 'mcp'
+  const [selectedCategory, setSelectedCategory] = useState('account'); // 'account', 'permissions', 'mcp', or 'provider'
 
   // Code Editor settings
   const [codeEditorTheme, setCodeEditorTheme] = useState(() =>
@@ -1335,6 +1336,19 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
                       >
                         MCP Servers
                       </button>
+                      {selectedAgent === 'claude' && (
+                        <button
+                          onClick={() => setSelectedCategory('provider')}
+                          className={`px-3 md:px-4 py-2 md:py-3 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                            selectedCategory === 'provider'
+                              ? 'border-yellow-600 text-yellow-600 dark:text-yellow-400'
+                              : 'border-transparent text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <Zap className="w-3 h-3 inline mr-1" />
+                          Provider
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -1431,6 +1445,17 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
                         onAdd={() => openCodexMcpForm()}
                         onEdit={(server) => openCodexMcpForm(server)}
                         onDelete={(serverId) => handleCodexMcpDelete(serverId)}
+                      />
+                    )}
+
+                    {/* Provider Switch Category - Claude only */}
+                    {selectedCategory === 'provider' && selectedAgent === 'claude' && (
+                      <ProviderSwitchContent
+                        onProviderChange={(provider) => {
+                          console.log('Provider changed to:', provider);
+                          // Refresh Claude auth status after provider change
+                          checkClaudeAuthStatus();
+                        }}
                       />
                     )}
                   </div>
