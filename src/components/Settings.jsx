@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Badge } from './ui/badge';
-import { X, Plus, Settings as SettingsIcon, Shield, AlertTriangle, Moon, Sun, Server, Edit3, Trash2, Globe, Terminal, Zap, FolderOpen, LogIn, Key, GitBranch, Check } from 'lucide-react';
+import { X, Plus, Settings as SettingsIcon, Shield, AlertTriangle, Moon, Sun, Server, Edit3, Trash2, Globe, Terminal, Zap, FolderOpen, LogIn, Key, GitBranch, Check, FileText, Sparkles } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import ClaudeLogo from './ClaudeLogo';
 import CursorLogo from './CursorLogo';
@@ -19,6 +19,9 @@ import AccountContent from './settings/AccountContent';
 import PermissionsContent from './settings/PermissionsContent';
 import McpServersContent from './settings/McpServersContent';
 import ProviderSwitchContent from './settings/ProviderSwitchContent';
+import McpManagerContent from './settings/McpManagerContent';
+import PromptsManagerContent from './settings/PromptsManagerContent';
+import SkillsManagerContent from './settings/SkillsManagerContent';
 
 function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
   const { isDarkMode, toggleDarkMode } = useTheme();
@@ -57,7 +60,7 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [jsonValidationError, setJsonValidationError] = useState('');
   const [selectedAgent, setSelectedAgent] = useState('claude'); // 'claude', 'cursor', or 'codex'
-  const [selectedCategory, setSelectedCategory] = useState('account'); // 'account', 'permissions', 'mcp', or 'provider'
+  const [selectedCategory, setSelectedCategory] = useState('account'); // 'account', 'permissions', 'mcp', 'provider', 'mcp-manager', 'prompts', 'skills'
 
   // Code Editor settings
   const [codeEditorTheme, setCodeEditorTheme] = useState(() =>
@@ -1349,6 +1352,45 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
                           Provider
                         </button>
                       )}
+                      {selectedAgent === 'claude' && (
+                        <button
+                          onClick={() => setSelectedCategory('mcp-manager')}
+                          className={`px-3 md:px-4 py-2 md:py-3 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                            selectedCategory === 'mcp-manager'
+                              ? 'border-purple-600 text-purple-600 dark:text-purple-400'
+                              : 'border-transparent text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <Server className="w-3 h-3 inline mr-1" />
+                          MCP Manager
+                        </button>
+                      )}
+                      {selectedAgent === 'claude' && (
+                        <button
+                          onClick={() => setSelectedCategory('prompts')}
+                          className={`px-3 md:px-4 py-2 md:py-3 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                            selectedCategory === 'prompts'
+                              ? 'border-blue-600 text-blue-600 dark:text-blue-400'
+                              : 'border-transparent text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <FileText className="w-3 h-3 inline mr-1" />
+                          Prompts
+                        </button>
+                      )}
+                      {selectedAgent === 'claude' && (
+                        <button
+                          onClick={() => setSelectedCategory('skills')}
+                          className={`px-3 md:px-4 py-2 md:py-3 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+                            selectedCategory === 'skills'
+                              ? 'border-yellow-500 text-yellow-500 dark:text-yellow-400'
+                              : 'border-transparent text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <Sparkles className="w-3 h-3 inline mr-1" />
+                          Skills
+                        </button>
+                      )}
                     </div>
                   </div>
 
@@ -1457,6 +1499,21 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }) {
                           checkClaudeAuthStatus();
                         }}
                       />
+                    )}
+
+                    {/* MCP Manager Category - Claude only */}
+                    {selectedCategory === 'mcp-manager' && selectedAgent === 'claude' && (
+                      <McpManagerContent />
+                    )}
+
+                    {/* Prompts Category - Claude only */}
+                    {selectedCategory === 'prompts' && selectedAgent === 'claude' && (
+                      <PromptsManagerContent />
+                    )}
+
+                    {/* Skills Category - Claude only */}
+                    {selectedCategory === 'skills' && selectedAgent === 'claude' && (
+                      <SkillsManagerContent />
                     )}
                   </div>
                 </div>

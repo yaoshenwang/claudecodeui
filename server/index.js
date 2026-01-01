@@ -370,7 +370,27 @@ app.post('/api/system/update', authenticateToken, async (req, res) => {
 
 app.get('/api/projects', authenticateToken, async (req, res) => {
     try {
-        const projects = await getProjects();
+        const parseBool = (v) => {
+            if (v === undefined || v === null) return undefined;
+            if (typeof v === 'boolean') return v;
+            const s = String(v).trim().toLowerCase();
+            if (['1', 'true', 'yes', 'y', 'on'].includes(s)) return true;
+            if (['0', 'false', 'no', 'n', 'off'].includes(s)) return false;
+            return undefined;
+        };
+
+        const lite = parseBool(req.query.lite) ?? false;
+        const sessionLimitRaw = req.query.sessionLimit ?? req.query.limit;
+        const sessionLimit = sessionLimitRaw ? Math.max(0, Math.min(50, parseInt(sessionLimitRaw, 10) || 0)) : undefined;
+
+        const projects = await getProjects({
+            lite,
+            sessionLimit,
+            includeCursorSessions: parseBool(req.query.includeCursorSessions),
+            includeCodexSessions: parseBool(req.query.includeCodexSessions),
+            includeTaskmaster: parseBool(req.query.includeTaskmaster),
+            taskmasterIncludeMetadata: parseBool(req.query.includeTaskmasterMetadata),
+        });
         res.json(projects);
     } catch (error) {
         res.status(500).json({ error: error.message });

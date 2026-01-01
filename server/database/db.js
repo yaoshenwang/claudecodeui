@@ -351,11 +351,472 @@ const githubTokensDb = {
   }
 };
 
+// CC-Switch: Provider database operations
+const ccProvidersDb = {
+  // Get all providers for an app type
+  getAll: (appType = 'claude') => {
+    try {
+      const rows = db.prepare(`
+        SELECT * FROM cc_providers
+        WHERE app_type = ?
+        ORDER BY sort_index ASC, created_at DESC
+      `).all(appType);
+      return rows.map(row => ({
+        ...row,
+        settings_config: JSON.parse(row.settings_config || '{}'),
+        is_current: !!row.is_current
+      }));
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Get current provider
+  getCurrent: (appType = 'claude') => {
+    try {
+      const row = db.prepare(`
+        SELECT * FROM cc_providers
+        WHERE app_type = ? AND is_current = 1
+        LIMIT 1
+      `).get(appType);
+      if (!row) return null;
+      return {
+        ...row,
+        settings_config: JSON.parse(row.settings_config || '{}'),
+        is_current: true
+      };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Get provider by ID
+  getById: (id) => {
+    try {
+      const row = db.prepare('SELECT * FROM cc_providers WHERE id = ?').get(id);
+      if (!row) return null;
+      return {
+        ...row,
+        settings_config: JSON.parse(row.settings_config || '{}'),
+        is_current: !!row.is_current
+      };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Create or update provider
+  upsert: (provider) => {
+    try {
+      const { id, name, app_type = 'claude', settings_config, website_url, category, notes, icon, icon_color, is_current, sort_index } = provider;
+      const configStr = typeof settings_config === 'string' ? settings_config : JSON.stringify(settings_config || {});
+
+      const stmt = db.prepare(`
+        INSERT INTO cc_providers (id, name, app_type, settings_config, website_url, category, notes, icon, icon_color, is_current, sort_index, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          settings_config = excluded.settings_config,
+          website_url = excluded.website_url,
+          category = excluded.category,
+          notes = excluded.notes,
+          icon = excluded.icon,
+          icon_color = excluded.icon_color,
+          is_current = excluded.is_current,
+          sort_index = excluded.sort_index,
+          updated_at = CURRENT_TIMESTAMP
+      `);
+      stmt.run(id, name, app_type, configStr, website_url || null, category || 'custom', notes || null, icon || null, icon_color || '#6366f1', is_current ? 1 : 0, sort_index || 0);
+      return { id, success: true };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Delete provider
+  delete: (id) => {
+    try {
+      const stmt = db.prepare('DELETE FROM cc_providers WHERE id = ?');
+      const result = stmt.run(id);
+      return result.changes > 0;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Switch current provider
+  switchTo: (id, appType = 'claude') => {
+    try {
+      db.transaction(() => {
+        // Clear current for app type
+        db.prepare('UPDATE cc_providers SET is_current = 0 WHERE app_type = ?').run(appType);
+        // Set new current
+        db.prepare('UPDATE cc_providers SET is_current = 1 WHERE id = ? AND app_type = ?').run(id, appType);
+      })();
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Update sort order
+  updateSortOrder: (updates) => {
+    try {
+      const stmt = db.prepare('UPDATE cc_providers SET sort_index = ? WHERE id = ?');
+      db.transaction(() => {
+        for (const { id, sortIndex } of updates) {
+          stmt.run(sortIndex, id);
+        }
+      })();
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
+// CC-Switch: Prompts database operations
+const ccPromptsDb = {
+  // Get all prompts for an app type
+  getAll: (appType = 'claude') => {
+    try {
+      const rows = db.prepare(`
+        SELECT * FROM cc_prompts
+        WHERE app_type = ?
+        ORDER BY sort_index ASC, created_at DESC
+      `).all(appType);
+      return rows.map(row => ({
+        ...row,
+        is_enabled: !!row.is_enabled
+      }));
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Get enabled prompt
+  getEnabled: (appType = 'claude') => {
+    try {
+      const row = db.prepare(`
+        SELECT * FROM cc_prompts
+        WHERE app_type = ? AND is_enabled = 1
+        LIMIT 1
+      `).get(appType);
+      if (!row) return null;
+      return { ...row, is_enabled: true };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Create or update prompt
+  upsert: (prompt) => {
+    try {
+      const { id, app_type = 'claude', name, content, description, is_enabled, sort_index } = prompt;
+
+      const stmt = db.prepare(`
+        INSERT INTO cc_prompts (id, app_type, name, content, description, is_enabled, sort_index, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          content = excluded.content,
+          description = excluded.description,
+          is_enabled = excluded.is_enabled,
+          sort_index = excluded.sort_index,
+          updated_at = CURRENT_TIMESTAMP
+      `);
+      stmt.run(id, app_type, name, content, description || null, is_enabled ? 1 : 0, sort_index || 0);
+      return { id, success: true };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Delete prompt
+  delete: (id) => {
+    try {
+      const stmt = db.prepare('DELETE FROM cc_prompts WHERE id = ?');
+      const result = stmt.run(id);
+      return result.changes > 0;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Enable prompt (disable others)
+  enable: (id, appType = 'claude') => {
+    try {
+      db.transaction(() => {
+        db.prepare('UPDATE cc_prompts SET is_enabled = 0 WHERE app_type = ?').run(appType);
+        db.prepare('UPDATE cc_prompts SET is_enabled = 1 WHERE id = ?').run(id);
+      })();
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Disable all prompts for app type
+  disableAll: (appType = 'claude') => {
+    try {
+      db.prepare('UPDATE cc_prompts SET is_enabled = 0 WHERE app_type = ?').run(appType);
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
+// CC-Switch: MCP Servers database operations
+const ccMcpServersDb = {
+  // Get all MCP servers
+  getAll: () => {
+    try {
+      const rows = db.prepare(`
+        SELECT * FROM cc_mcp_servers
+        ORDER BY sort_index ASC, created_at DESC
+      `).all();
+      return rows.map(row => ({
+        ...row,
+        args: JSON.parse(row.args || '[]'),
+        env: JSON.parse(row.env || '{}'),
+        enabled_claude: !!row.enabled_claude,
+        enabled_codex: !!row.enabled_codex,
+        enabled_gemini: !!row.enabled_gemini
+      }));
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Get MCP servers enabled for a specific app
+  getForApp: (appType = 'claude') => {
+    try {
+      const column = `enabled_${appType}`;
+      const rows = db.prepare(`
+        SELECT * FROM cc_mcp_servers
+        WHERE ${column} = 1
+        ORDER BY sort_index ASC, created_at DESC
+      `).all();
+      return rows.map(row => ({
+        ...row,
+        args: JSON.parse(row.args || '[]'),
+        env: JSON.parse(row.env || '{}')
+      }));
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Create or update MCP server
+  upsert: (server) => {
+    try {
+      const { id, name, command, args, env, enabled_claude, enabled_codex, enabled_gemini, description, sort_index } = server;
+      const argsStr = typeof args === 'string' ? args : JSON.stringify(args || []);
+      const envStr = typeof env === 'string' ? env : JSON.stringify(env || {});
+
+      const stmt = db.prepare(`
+        INSERT INTO cc_mcp_servers (id, name, command, args, env, enabled_claude, enabled_codex, enabled_gemini, description, sort_index, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          command = excluded.command,
+          args = excluded.args,
+          env = excluded.env,
+          enabled_claude = excluded.enabled_claude,
+          enabled_codex = excluded.enabled_codex,
+          enabled_gemini = excluded.enabled_gemini,
+          description = excluded.description,
+          sort_index = excluded.sort_index,
+          updated_at = CURRENT_TIMESTAMP
+      `);
+      stmt.run(id, name, command, argsStr, envStr, enabled_claude ? 1 : 0, enabled_codex ? 1 : 0, enabled_gemini ? 1 : 0, description || null, sort_index || 0);
+      return { id, success: true };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Delete MCP server
+  delete: (id) => {
+    try {
+      const stmt = db.prepare('DELETE FROM cc_mcp_servers WHERE id = ?');
+      const result = stmt.run(id);
+      return result.changes > 0;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Toggle app enabled state
+  toggleApp: (id, appType, enabled) => {
+    try {
+      const column = `enabled_${appType}`;
+      const stmt = db.prepare(`UPDATE cc_mcp_servers SET ${column} = ? WHERE id = ?`);
+      stmt.run(enabled ? 1 : 0, id);
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
+// CC-Switch: Skills repositories database operations
+const ccSkillReposDb = {
+  // Get all skill repos
+  getAll: () => {
+    try {
+      const rows = db.prepare('SELECT * FROM cc_skill_repos ORDER BY created_at DESC').all();
+      return rows.map(row => ({
+        ...row,
+        is_enabled: !!row.is_enabled
+      }));
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Add skill repo
+  add: (owner, name, branch = 'main') => {
+    try {
+      const stmt = db.prepare('INSERT OR REPLACE INTO cc_skill_repos (owner, name, branch) VALUES (?, ?, ?)');
+      const result = stmt.run(owner, name, branch);
+      return { id: result.lastInsertRowid, success: true };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Remove skill repo
+  remove: (owner, name) => {
+    try {
+      const stmt = db.prepare('DELETE FROM cc_skill_repos WHERE owner = ? AND name = ?');
+      const result = stmt.run(owner, name);
+      return result.changes > 0;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Toggle repo enabled
+  toggle: (id, enabled) => {
+    try {
+      const stmt = db.prepare('UPDATE cc_skill_repos SET is_enabled = ? WHERE id = ?');
+      stmt.run(enabled ? 1 : 0, id);
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
+// CC-Switch: Speed test database operations
+const ccSpeedTestsDb = {
+  // Save test result
+  save: (providerId, appType, responseTimeMs, httpStatus, status) => {
+    try {
+      const stmt = db.prepare(`
+        INSERT INTO cc_speed_tests (provider_id, app_type, response_time_ms, http_status, status)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      const result = stmt.run(providerId, appType, responseTimeMs, httpStatus, status);
+      return { id: result.lastInsertRowid, success: true };
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Get latest results for all providers
+  getLatest: (appType = 'claude') => {
+    try {
+      const rows = db.prepare(`
+        SELECT st.*, p.name as provider_name
+        FROM cc_speed_tests st
+        JOIN cc_providers p ON st.provider_id = p.id
+        WHERE st.app_type = ?
+        AND st.id IN (
+          SELECT MAX(id) FROM cc_speed_tests WHERE app_type = ? GROUP BY provider_id
+        )
+        ORDER BY st.tested_at DESC
+      `).all(appType, appType);
+      return rows;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  // Clean old results (keep last N per provider)
+  cleanup: (keepCount = 10) => {
+    try {
+      db.prepare(`
+        DELETE FROM cc_speed_tests
+        WHERE id NOT IN (
+          SELECT id FROM (
+            SELECT id, provider_id,
+            ROW_NUMBER() OVER (PARTITION BY provider_id ORDER BY tested_at DESC) as rn
+            FROM cc_speed_tests
+          ) WHERE rn <= ?
+        )
+      `).run(keepCount);
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
+// CC-Switch: Settings database operations
+const ccSettingsDb = {
+  get: (key) => {
+    try {
+      const row = db.prepare('SELECT value FROM cc_settings WHERE key = ?').get(key);
+      return row ? JSON.parse(row.value) : null;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  set: (key, value) => {
+    try {
+      const valueStr = JSON.stringify(value);
+      db.prepare(`
+        INSERT INTO cc_settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(key, valueStr);
+      return true;
+    } catch (err) {
+      throw err;
+    }
+  },
+
+  getAll: () => {
+    try {
+      const rows = db.prepare('SELECT * FROM cc_settings').all();
+      const result = {};
+      for (const row of rows) {
+        result[row.key] = JSON.parse(row.value);
+      }
+      return result;
+    } catch (err) {
+      throw err;
+    }
+  }
+};
+
 export {
   db,
   initializeDatabase,
   userDb,
   apiKeysDb,
   credentialsDb,
-  githubTokensDb // Backward compatibility
+  githubTokensDb, // Backward compatibility
+  ccProvidersDb,
+  ccPromptsDb,
+  ccMcpServersDb,
+  ccSkillReposDb,
+  ccSpeedTestsDb,
+  ccSettingsDb
 };
