@@ -8,6 +8,7 @@
 import express from 'express';
 import Database from 'better-sqlite3';
 import fs from 'fs/promises';
+import { existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
 
@@ -24,7 +25,7 @@ const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json');
  */
 function isCcSwitchInstalled() {
     try {
-        return require('fs').existsSync(CC_SWITCH_DB);
+        return existsSync(CC_SWITCH_DB);
     } catch {
         return false;
     }
