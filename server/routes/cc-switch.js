@@ -17,13 +17,21 @@ import { existsSync, readFileSync, writeFileSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { ccProvidersDb, ccPromptsDb, ccMcpServersDb, ccSkillReposDb, ccSpeedTestsDb, ccSettingsDb } from '../database/db.js';
 
 const router = express.Router();
 
 // Config paths
 const HOME_DIR = os.homedir();
 const CC_SWITCH_DIR = path.join(HOME_DIR, '.cc-switch');
+const CC_SWITCH_DB_PATH = path.join(CC_SWITCH_DIR, 'cc-switch.db');
+
+// Get CC-Switch database connection (uses the actual CC-Switch app's database)
+function getCCSwitchDb() {
+    if (!existsSync(CC_SWITCH_DB_PATH)) {
+        return null;
+    }
+    return new Database(CC_SWITCH_DB_PATH);
+}
 const CLAUDE_DIR = path.join(HOME_DIR, '.claude');
 const CODEX_DIR = path.join(HOME_DIR, '.codex');
 const GEMINI_DIR = path.join(HOME_DIR, '.gemini');
@@ -122,40 +130,78 @@ router.get('/status', (req, res) => {
 
 /**
  * GET /api/cc-switch/providers
- * Get all providers for an app type
+ * Get all providers for an app type (reads from CC-Switch app's database)
  */
 router.get('/providers', (req, res) => {
     try {
         const appType = req.query.app || 'claude';
-        const providers = ccProvidersDb.getAll(appType);
+        const db = getCCSwitchDb();
 
-        // Mask sensitive tokens
-        const result = providers.map(p => {
-            const config = p.settings_config || {};
-            const maskedConfig = { ...config };
+        if (!db) {
+            return res.json({ providers: [], error: 'CC-Switch database not found' });
+        }
 
-            if (maskedConfig.env) {
-                maskedConfig.env = { ...maskedConfig.env };
-                for (const key of Object.keys(maskedConfig.env)) {
-                    if (key.includes('TOKEN') || key.includes('KEY') || key.includes('SECRET')) {
-                        const value = maskedConfig.env[key];
-                        if (value && value.length > 12) {
-                            maskedConfig.env[key + '_MASKED'] = value.substring(0, 8) + '...' + value.substring(value.length - 4);
-                            delete maskedConfig.env[key];
+        try {
+            const providers = db.prepare(`
+                SELECT id, app_type, name, settings_config, website_url, category,
+                       created_at, sort_index, notes, icon, icon_color, is_current
+                FROM providers
+                WHERE app_type = ?
+                ORDER BY sort_index ASC, created_at DESC
+            `).all(appType);
+
+            db.close();
+
+            // Parse settings_config and mask sensitive tokens
+            const result = providers.map(p => {
+                let config = {};
+                try {
+                    config = JSON.parse(p.settings_config || '{}');
+                } catch (e) {
+                    config = {};
+                }
+
+                const maskedConfig = { ...config };
+                if (maskedConfig.env) {
+                    maskedConfig.env = { ...maskedConfig.env };
+                    for (const key of Object.keys(maskedConfig.env)) {
+                        if (key.includes('TOKEN') || key.includes('KEY') || key.includes('SECRET')) {
+                            const value = maskedConfig.env[key];
+                            if (value && value.length > 12) {
+                                maskedConfig.env[key + '_MASKED'] = value.substring(0, 8) + '...' + value.substring(value.length - 4);
+                                delete maskedConfig.env[key];
+                            }
                         }
                     }
                 }
-            }
+                if (maskedConfig.auth) {
+                    maskedConfig.auth = { ...maskedConfig.auth };
+                    for (const key of Object.keys(maskedConfig.auth)) {
+                        if (key.includes('TOKEN') || key.includes('KEY') || key.includes('SECRET')) {
+                            const value = maskedConfig.auth[key];
+                            if (value && value.length > 12) {
+                                maskedConfig.auth[key + '_MASKED'] = value.substring(0, 8) + '...' + value.substring(value.length - 4);
+                                delete maskedConfig.auth[key];
+                            }
+                        }
+                    }
+                }
 
-            return {
-                ...p,
-                settings_config: maskedConfig,
-                baseUrl: config.env?.ANTHROPIC_BASE_URL || config.env?.OPENAI_BASE_URL || config.env?.GOOGLE_GEMINI_BASE_URL,
-                model: config.env?.ANTHROPIC_MODEL || config.env?.OPENAI_MODEL || config.env?.GEMINI_MODEL
-            };
-        });
+                return {
+                    ...p,
+                    settings_config: maskedConfig,
+                    is_current: Boolean(p.is_current),
+                    baseUrl: config.env?.ANTHROPIC_BASE_URL || config.env?.OPENAI_BASE_URL ||
+                             config.env?.GOOGLE_GEMINI_BASE_URL || p.website_url,
+                    model: config.env?.ANTHROPIC_MODEL || config.env?.OPENAI_MODEL || config.env?.GEMINI_MODEL
+                };
+            });
 
-        res.json({ providers: result });
+            res.json({ providers: result });
+        } catch (dbError) {
+            db.close();
+            throw dbError;
+        }
     } catch (error) {
         console.error('Error fetching providers:', error);
         res.status(500).json({ error: error.message });
@@ -164,26 +210,49 @@ router.get('/providers', (req, res) => {
 
 /**
  * GET /api/cc-switch/providers/current
- * Get current active provider
+ * Get current active provider (reads from CC-Switch app's database)
  */
 router.get('/providers/current', (req, res) => {
     try {
         const appType = req.query.app || 'claude';
-        const provider = ccProvidersDb.getCurrent(appType);
+        const db = getCCSwitchDb();
 
-        if (!provider) {
+        if (!db) {
             return res.json({ current: null });
         }
 
-        const config = provider.settings_config || {};
-        res.json({
-            current: {
-                id: provider.id,
-                name: provider.name,
-                baseUrl: config.env?.ANTHROPIC_BASE_URL || config.env?.OPENAI_BASE_URL,
-                model: config.env?.ANTHROPIC_MODEL || config.env?.OPENAI_MODEL
+        try {
+            const provider = db.prepare(`
+                SELECT id, name, settings_config, website_url
+                FROM providers
+                WHERE app_type = ? AND is_current = 1
+            `).get(appType);
+
+            db.close();
+
+            if (!provider) {
+                return res.json({ current: null });
             }
-        });
+
+            let config = {};
+            try {
+                config = JSON.parse(provider.settings_config || '{}');
+            } catch (e) {
+                config = {};
+            }
+
+            res.json({
+                current: {
+                    id: provider.id,
+                    name: provider.name,
+                    baseUrl: config.env?.ANTHROPIC_BASE_URL || config.env?.OPENAI_BASE_URL || provider.website_url,
+                    model: config.env?.ANTHROPIC_MODEL || config.env?.OPENAI_MODEL
+                }
+            });
+        } catch (dbError) {
+            db.close();
+            throw dbError;
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -191,20 +260,56 @@ router.get('/providers/current', (req, res) => {
 
 /**
  * POST /api/cc-switch/providers
- * Create or update a provider
+ * Create or update a provider (writes to CC-Switch app's database)
  */
 router.post('/providers', (req, res) => {
     try {
         const provider = req.body;
+        const db = getCCSwitchDb();
+
+        if (!db) {
+            return res.status(500).json({ error: 'CC-Switch database not found' });
+        }
+
         if (!provider.id) {
             provider.id = generateId();
         }
         if (!provider.name) {
+            db.close();
             return res.status(400).json({ error: 'Provider name is required' });
         }
 
-        const result = ccProvidersDb.upsert(provider);
-        res.json({ success: true, provider: { id: result.id } });
+        try {
+            const appType = provider.app_type || 'claude';
+            const settingsConfig = typeof provider.settings_config === 'string'
+                ? provider.settings_config
+                : JSON.stringify(provider.settings_config || {});
+
+            db.prepare(`
+                INSERT OR REPLACE INTO providers
+                (id, app_type, name, settings_config, website_url, category, notes, icon, icon_color, sort_index, is_current, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                provider.id,
+                appType,
+                provider.name,
+                settingsConfig,
+                provider.website_url || null,
+                provider.category || 'custom',
+                provider.notes || null,
+                provider.icon || null,
+                provider.icon_color || '#6366f1',
+                provider.sort_index || 0,
+                provider.is_current ? 1 : 0,
+                Date.now()
+            );
+
+            db.close();
+            res.json({ success: true, provider: { id: provider.id } });
+        } catch (dbError) {
+            db.close();
+            throw dbError;
+        }
     } catch (error) {
         console.error('Error creating provider:', error);
         res.status(500).json({ error: error.message });
@@ -213,15 +318,48 @@ router.post('/providers', (req, res) => {
 
 /**
  * PUT /api/cc-switch/providers/:id
- * Update a provider
+ * Update a provider (writes to CC-Switch app's database)
  */
 router.put('/providers/:id', (req, res) => {
     try {
         const { id } = req.params;
         const provider = { ...req.body, id };
+        const db = getCCSwitchDb();
 
-        const result = ccProvidersDb.upsert(provider);
-        res.json({ success: true, provider: { id: result.id } });
+        if (!db) {
+            return res.status(500).json({ error: 'CC-Switch database not found' });
+        }
+
+        try {
+            const appType = provider.app_type || req.query.app || 'claude';
+            const settingsConfig = typeof provider.settings_config === 'string'
+                ? provider.settings_config
+                : JSON.stringify(provider.settings_config || {});
+
+            db.prepare(`
+                UPDATE providers
+                SET name = ?, settings_config = ?, website_url = ?, category = ?,
+                    notes = ?, icon = ?, icon_color = ?, sort_index = ?
+                WHERE id = ? AND app_type = ?
+            `).run(
+                provider.name,
+                settingsConfig,
+                provider.website_url || null,
+                provider.category || 'custom',
+                provider.notes || null,
+                provider.icon || null,
+                provider.icon_color || '#6366f1',
+                provider.sort_index || 0,
+                id,
+                appType
+            );
+
+            db.close();
+            res.json({ success: true, provider: { id } });
+        } catch (dbError) {
+            db.close();
+            throw dbError;
+        }
     } catch (error) {
         console.error('Error updating provider:', error);
         res.status(500).json({ error: error.message });
@@ -230,18 +368,34 @@ router.put('/providers/:id', (req, res) => {
 
 /**
  * DELETE /api/cc-switch/providers/:id
- * Delete a provider
+ * Delete a provider (from CC-Switch app's database)
  */
 router.delete('/providers/:id', (req, res) => {
     try {
         const { id } = req.params;
-        const deleted = ccProvidersDb.delete(id);
+        const appType = req.query.app || 'claude';
+        const db = getCCSwitchDb();
 
-        if (!deleted) {
-            return res.status(404).json({ error: 'Provider not found' });
+        if (!db) {
+            return res.status(500).json({ error: 'CC-Switch database not found' });
         }
 
-        res.json({ success: true });
+        try {
+            const result = db.prepare(`
+                DELETE FROM providers WHERE id = ? AND app_type = ?
+            `).run(id, appType);
+
+            db.close();
+
+            if (result.changes === 0) {
+                return res.status(404).json({ error: 'Provider not found' });
+            }
+
+            res.json({ success: true });
+        } catch (dbError) {
+            db.close();
+            throw dbError;
+        }
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -249,35 +403,60 @@ router.delete('/providers/:id', (req, res) => {
 
 /**
  * POST /api/cc-switch/providers/:id/switch
- * Switch to a provider
+ * Switch to a provider (updates CC-Switch app's database and applies config)
  */
 router.post('/providers/:id/switch', async (req, res) => {
     try {
         const { id } = req.params;
         const appType = req.query.app || 'claude';
+        const db = getCCSwitchDb();
 
-        const provider = ccProvidersDb.getById(id);
-        if (!provider) {
-            return res.status(404).json({ error: 'Provider not found' });
+        if (!db) {
+            return res.status(500).json({ error: 'CC-Switch database not found' });
         }
 
-        // Update database
-        ccProvidersDb.switchTo(id, appType);
+        try {
+            // Get the provider
+            const provider = db.prepare(`
+                SELECT * FROM providers WHERE id = ? AND app_type = ?
+            `).get(id, appType);
 
-        // Apply config to app settings
-        await applyProviderConfig(provider, appType);
+            if (!provider) {
+                db.close();
+                return res.status(404).json({ error: 'Provider not found' });
+            }
 
-        const config = provider.settings_config || {};
-        res.json({
-            success: true,
-            provider: {
-                id: provider.id,
-                name: provider.name,
-                baseUrl: config.env?.ANTHROPIC_BASE_URL || config.env?.OPENAI_BASE_URL,
-                model: config.env?.ANTHROPIC_MODEL || config.env?.OPENAI_MODEL
-            },
-            message: `Switched to ${provider.name}`
-        });
+            // Update is_current flags
+            db.prepare(`UPDATE providers SET is_current = 0 WHERE app_type = ?`).run(appType);
+            db.prepare(`UPDATE providers SET is_current = 1 WHERE id = ? AND app_type = ?`).run(id, appType);
+
+            db.close();
+
+            // Parse settings config
+            let config = {};
+            try {
+                config = JSON.parse(provider.settings_config || '{}');
+            } catch (e) {
+                config = {};
+            }
+
+            // Apply config to app settings
+            await applyProviderConfig({ ...provider, settings_config: config }, appType);
+
+            res.json({
+                success: true,
+                provider: {
+                    id: provider.id,
+                    name: provider.name,
+                    baseUrl: config.env?.ANTHROPIC_BASE_URL || config.env?.OPENAI_BASE_URL || provider.website_url,
+                    model: config.env?.ANTHROPIC_MODEL || config.env?.OPENAI_MODEL
+                },
+                message: `Switched to ${provider.name}`
+            });
+        } catch (dbError) {
+            try { db.close(); } catch (e) {}
+            throw dbError;
+        }
     } catch (error) {
         console.error('Error switching provider:', error);
         res.status(500).json({ error: error.message });
