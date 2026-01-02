@@ -67,7 +67,7 @@ import { open } from 'sqlite';
 import os from 'os';
 
 // Import TaskMaster detection functions
-async function detectTaskMasterFolder(projectPath) {
+async function detectTaskMasterFolder(projectPath, { includeMetadata = true } = {}) {
     try {
         const taskMasterPath = path.join(projectPath, '.taskmaster');
         
@@ -114,7 +114,7 @@ async function detectTaskMasterFolder(projectPath) {
 
         // Parse tasks.json if it exists for metadata
         let taskMetadata = null;
-        if (fileStatus['tasks/tasks.json']) {
+        if (includeMetadata && fileStatus['tasks/tasks.json']) {
             try {
                 const tasksPath = path.join(taskMasterPath, 'tasks/tasks.json');
                 const tasksContent = await fs.readFile(tasksPath, 'utf8');
@@ -379,11 +379,26 @@ async function extractProjectDirectory(projectName) {
   }
 }
 
-async function getProjects() {
+async function getProjects(options = {}) {
   const claudeDir = path.join(os.homedir(), '.claude', 'projects');
   const config = await loadProjectConfig();
   const projects = [];
   const existingProjects = new Set();
+
+  const {
+    lite = false,
+    sessionLimit: sessionLimitOption,
+    includeCursorSessions,
+    includeCodexSessions,
+    includeTaskmaster,
+    taskmasterIncludeMetadata
+  } = options;
+
+  const sessionLimit = sessionLimitOption ?? 5;
+  const resolvedIncludeCursorSessions = includeCursorSessions ?? !lite;
+  const resolvedIncludeCodexSessions = includeCodexSessions ?? !lite;
+  const resolvedIncludeTaskmaster = includeTaskmaster ?? !lite;
+  const resolvedTaskmasterIncludeMetadata = taskmasterIncludeMetadata ?? !lite;
   
   try {
     // Check if the .claude/projects directory exists
@@ -416,7 +431,7 @@ async function getProjects() {
         
         // Try to get sessions for this project (just first 5 for performance)
         try {
-          const sessionResult = await getSessions(entry.name, 5, 0);
+          const sessionResult = await getSessions(entry.name, sessionLimit, 0);
           project.sessions = sessionResult.sessions || [];
           project.sessionMeta = {
             hasMore: sessionResult.hasMore,
@@ -426,39 +441,45 @@ async function getProjects() {
           console.warn(`Could not load sessions for project ${entry.name}:`, e.message);
         }
         
-        // Also fetch Cursor sessions for this project
-        try {
-          project.cursorSessions = await getCursorSessions(actualProjectDir);
-        } catch (e) {
-          console.warn(`Could not load Cursor sessions for project ${entry.name}:`, e.message);
-          project.cursorSessions = [];
+        project.cursorSessions = [];
+        if (resolvedIncludeCursorSessions) {
+          try {
+            project.cursorSessions = await getCursorSessions(actualProjectDir, { limit: sessionLimit, lite });
+          } catch (e) {
+            console.warn(`Could not load Cursor sessions for project ${entry.name}:`, e.message);
+            project.cursorSessions = [];
+          }
         }
 
-        // Also fetch Codex sessions for this project
-        try {
-          project.codexSessions = await getCodexSessions(actualProjectDir);
-        } catch (e) {
-          console.warn(`Could not load Codex sessions for project ${entry.name}:`, e.message);
-          project.codexSessions = [];
+        project.codexSessions = [];
+        if (resolvedIncludeCodexSessions) {
+          try {
+            project.codexSessions = await getCodexSessions(actualProjectDir, { limit: sessionLimit, lite });
+          } catch (e) {
+            console.warn(`Could not load Codex sessions for project ${entry.name}:`, e.message);
+            project.codexSessions = [];
+          }
         }
 
-        // Add TaskMaster detection
-        try {
-          const taskMasterResult = await detectTaskMasterFolder(actualProjectDir);
-          project.taskmaster = {
-            hasTaskmaster: taskMasterResult.hasTaskmaster,
-            hasEssentialFiles: taskMasterResult.hasEssentialFiles,
-            metadata: taskMasterResult.metadata,
-            status: taskMasterResult.hasTaskmaster && taskMasterResult.hasEssentialFiles ? 'configured' : 'not-configured'
-          };
-        } catch (e) {
-          console.warn(`Could not detect TaskMaster for project ${entry.name}:`, e.message);
-          project.taskmaster = {
-            hasTaskmaster: false,
-            hasEssentialFiles: false,
-            metadata: null,
-            status: 'error'
-          };
+        project.taskmaster = null;
+        if (resolvedIncludeTaskmaster) {
+          try {
+            const taskMasterResult = await detectTaskMasterFolder(actualProjectDir, { includeMetadata: resolvedTaskmasterIncludeMetadata });
+            project.taskmaster = {
+              hasTaskmaster: taskMasterResult.hasTaskmaster,
+              hasEssentialFiles: taskMasterResult.hasEssentialFiles,
+              metadata: taskMasterResult.metadata,
+              status: taskMasterResult.hasTaskmaster && taskMasterResult.hasEssentialFiles ? 'configured' : 'not-configured'
+            };
+          } catch (e) {
+            console.warn(`Could not detect TaskMaster for project ${entry.name}:`, e.message);
+            project.taskmaster = {
+              hasTaskmaster: false,
+              hasEssentialFiles: false,
+              metadata: null,
+              status: 'error'
+            };
+          }
         }
         
         projects.push(project);
@@ -498,44 +519,48 @@ async function getProjects() {
           codexSessions: []
         };
 
-      // Try to fetch Cursor sessions for manual projects too
-      try {
-        project.cursorSessions = await getCursorSessions(actualProjectDir);
-      } catch (e) {
-        console.warn(`Could not load Cursor sessions for manual project ${projectName}:`, e.message);
-      }
-
-      // Try to fetch Codex sessions for manual projects too
-      try {
-        project.codexSessions = await getCodexSessions(actualProjectDir);
-      } catch (e) {
-        console.warn(`Could not load Codex sessions for manual project ${projectName}:`, e.message);
-      }
-
-      // Add TaskMaster detection for manual projects
-      try {
-        const taskMasterResult = await detectTaskMasterFolder(actualProjectDir);
-        
-        // Determine TaskMaster status
-        let taskMasterStatus = 'not-configured';
-        if (taskMasterResult.hasTaskmaster && taskMasterResult.hasEssentialFiles) {
-          taskMasterStatus = 'taskmaster-only'; // We don't check MCP for manual projects in bulk
+      if (resolvedIncludeCursorSessions) {
+        try {
+          project.cursorSessions = await getCursorSessions(actualProjectDir, { limit: sessionLimit, lite });
+        } catch (e) {
+          console.warn(`Could not load Cursor sessions for manual project ${projectName}:`, e.message);
         }
-        
-        project.taskmaster = {
-          status: taskMasterStatus,
-          hasTaskmaster: taskMasterResult.hasTaskmaster,
-          hasEssentialFiles: taskMasterResult.hasEssentialFiles,
-          metadata: taskMasterResult.metadata
-        };
-      } catch (error) {
-        console.warn(`TaskMaster detection failed for manual project ${projectName}:`, error.message);
-        project.taskmaster = {
-          status: 'error',
-          hasTaskmaster: false,
-          hasEssentialFiles: false,
-          error: error.message
-        };
+      }
+
+      if (resolvedIncludeCodexSessions) {
+        try {
+          project.codexSessions = await getCodexSessions(actualProjectDir, { limit: sessionLimit, lite });
+        } catch (e) {
+          console.warn(`Could not load Codex sessions for manual project ${projectName}:`, e.message);
+        }
+      }
+
+      project.taskmaster = null;
+      if (resolvedIncludeTaskmaster) {
+        try {
+          const taskMasterResult = await detectTaskMasterFolder(actualProjectDir, { includeMetadata: resolvedTaskmasterIncludeMetadata });
+          
+          // Determine TaskMaster status
+          let taskMasterStatus = 'not-configured';
+          if (taskMasterResult.hasTaskmaster && taskMasterResult.hasEssentialFiles) {
+            taskMasterStatus = 'taskmaster-only'; // We don't check MCP for manual projects in bulk
+          }
+          
+          project.taskmaster = {
+            status: taskMasterStatus,
+            hasTaskmaster: taskMasterResult.hasTaskmaster,
+            hasEssentialFiles: taskMasterResult.hasEssentialFiles,
+            metadata: taskMasterResult.metadata
+          };
+        } catch (error) {
+          console.warn(`TaskMaster detection failed for manual project ${projectName}:`, error.message);
+          project.taskmaster = {
+            status: 'error',
+            hasTaskmaster: false,
+            hasEssentialFiles: false,
+            error: error.message
+          };
+        }
       }
       
       projects.push(project);
@@ -1054,110 +1079,104 @@ async function addProjectManually(projectPath, displayName = null) {
 }
 
 // Fetch Cursor sessions for a given project path
-async function getCursorSessions(projectPath) {
+async function getCursorSessions(projectPath, options = {}) {
   try {
+    const { limit = 5, lite = false } = options;
+
     // Calculate cwdID hash for the project path (Cursor uses MD5 hash)
     const cwdId = crypto.createHash('md5').update(projectPath).digest('hex');
     const cursorChatsPath = path.join(os.homedir(), '.cursor', 'chats', cwdId);
-    
-    // Check if the directory exists
+
     try {
       await fs.access(cursorChatsPath);
-    } catch (error) {
-      // No sessions for this project
+    } catch {
       return [];
     }
-    
-    // List all session directories
-    const sessionDirs = await fs.readdir(cursorChatsPath);
-    const sessions = [];
-    
-    for (const sessionId of sessionDirs) {
-      const sessionPath = path.join(cursorChatsPath, sessionId);
-      const storeDbPath = path.join(sessionPath, 'store.db');
-      
-      try {
-        // Check if store.db exists
-        await fs.access(storeDbPath);
-        
-        // Capture store.db mtime as a reliable fallback timestamp
-        let dbStatMtimeMs = null;
-        try {
-          const stat = await fs.stat(storeDbPath);
-          dbStatMtimeMs = stat.mtimeMs;
-        } catch (_) {}
 
-        // Open SQLite database
+    const sessionDirs = await fs.readdir(cursorChatsPath);
+    const candidates = [];
+
+    for (const sessionId of sessionDirs) {
+      const storeDbPath = path.join(cursorChatsPath, sessionId, 'store.db');
+      try {
+        const st = await fs.stat(storeDbPath);
+        candidates.push({ sessionId, storeDbPath, mtimeMs: st.mtimeMs });
+      } catch {
+        // ignore
+      }
+    }
+
+    candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const selected = candidates.slice(0, limit);
+
+    const sessions = [];
+    for (const { sessionId, storeDbPath, mtimeMs } of selected) {
+      let createdAt = new Date(mtimeMs).toISOString();
+      let name = 'Untitled Session';
+      let messageCount = 0;
+
+      try {
         const db = await open({
           filename: storeDbPath,
           driver: sqlite3.Database,
           mode: sqlite3.OPEN_READONLY
         });
-        
-        // Get metadata from meta table
-        const metaRows = await db.all(`
-          SELECT key, value FROM meta
-        `);
-        
-        // Parse metadata
-        let metadata = {};
-        for (const row of metaRows) {
-          if (row.value) {
+
+        try {
+          const metaRows = await db.all(`SELECT key, value FROM meta`);
+          for (const row of metaRows) {
+            if (!row.value) continue;
+            const raw = row.value.toString();
             try {
-              // Try to decode as hex-encoded JSON
-              const hexMatch = row.value.toString().match(/^[0-9a-fA-F]+$/);
-              if (hexMatch) {
-                const jsonStr = Buffer.from(row.value, 'hex').toString('utf8');
-                metadata[row.key] = JSON.parse(jsonStr);
-              } else {
-                metadata[row.key] = row.value.toString();
+              const isHex = /^[0-9a-fA-F]+$/.test(raw);
+              const decoded = isHex ? Buffer.from(raw, 'hex').toString('utf8') : raw;
+              const parsed = isHex ? JSON.parse(decoded) : decoded;
+
+              if (row.key === 'agent' && parsed && typeof parsed === 'object') {
+                if (parsed.name) name = parsed.name;
+                if (parsed.createdAt) {
+                  const n = Number(parsed.createdAt);
+                  const ms = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : Date.parse(parsed.createdAt);
+                  if (Number.isFinite(ms)) createdAt = new Date(ms).toISOString();
+                }
               }
-            } catch (e) {
-              metadata[row.key] = row.value.toString();
+              if ((row.key === 'title' || row.key === 'sessionTitle') && typeof parsed === 'string') {
+                name = parsed;
+              }
+              if (row.key === 'createdAt' && typeof parsed === 'string') {
+                const ms = Date.parse(parsed);
+                if (Number.isFinite(ms)) createdAt = new Date(ms).toISOString();
+              }
+            } catch {
+              // ignore
             }
           }
+        } catch {}
+
+        if (!lite) {
+          try {
+            const messageCountResult = await db.get(`SELECT COUNT(*) as count FROM blobs`);
+            messageCount = messageCountResult?.count || 0;
+          } catch {}
         }
-        
-        // Get message count
-        const messageCountResult = await db.get(`
-          SELECT COUNT(*) as count FROM blobs
-        `);
-        
+
         await db.close();
-        
-        // Extract session info
-        const sessionName = metadata.title || metadata.sessionTitle || 'Untitled Session';
-        
-        // Determine timestamp - prefer createdAt from metadata, fall back to db file mtime
-        let createdAt = null;
-        if (metadata.createdAt) {
-          createdAt = new Date(metadata.createdAt).toISOString();
-        } else if (dbStatMtimeMs) {
-          createdAt = new Date(dbStatMtimeMs).toISOString();
-        } else {
-          createdAt = new Date().toISOString();
-        }
-        
-        sessions.push({
-          id: sessionId,
-          name: sessionName,
-          createdAt: createdAt,
-          lastActivity: createdAt, // For compatibility with Claude sessions
-          messageCount: messageCountResult.count || 0,
-          projectPath: projectPath
-        });
-        
       } catch (error) {
         console.warn(`Could not read Cursor session ${sessionId}:`, error.message);
       }
+
+      sessions.push({
+        id: sessionId,
+        name,
+        createdAt,
+        lastActivity: createdAt,
+        messageCount,
+        projectPath
+      });
     }
-    
-    // Sort sessions by creation time (newest first)
+
     sessions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-    
-    // Return only the first 5 sessions for performance
-    return sessions.slice(0, 5);
-    
+    return sessions;
   } catch (error) {
     console.error('Error fetching Cursor sessions:', error);
     return [];
@@ -1166,8 +1185,9 @@ async function getCursorSessions(projectPath) {
 
 
 // Fetch Codex sessions for a given project path
-async function getCodexSessions(projectPath) {
+async function getCodexSessions(projectPath, options = {}) {
   try {
+    const { limit = 5, lite = false, scanLimit = (lite ? 50 : 200) } = options;
     const codexSessionsDir = path.join(os.homedir(), '.codex', 'sessions');
     const sessions = [];
 
@@ -1199,24 +1219,37 @@ async function getCodexSessions(projectPath) {
     };
 
     const jsonlFiles = await findJsonlFiles(codexSessionsDir);
-
-    // Process each file to find sessions matching the project path
+    const filesWithMtime = [];
     for (const filePath of jsonlFiles) {
       try {
-        const sessionData = await parseCodexSessionFile(filePath);
+        const st = await fs.stat(filePath);
+        filesWithMtime.push({ filePath, mtimeMs: st.mtimeMs });
+      } catch {
+        // ignore
+      }
+    }
+    filesWithMtime.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const candidates = filesWithMtime.slice(0, scanLimit);
+
+    // Process newest files first and stop once we have enough matching sessions
+    for (const { filePath, mtimeMs } of candidates) {
+      try {
+        const sessionData = await parseCodexSessionFile(filePath, { lite });
 
         // Check if this session matches the project path
         if (sessionData && sessionData.cwd === projectPath) {
+          const lastActivity = sessionData.timestamp ? new Date(sessionData.timestamp) : new Date(mtimeMs);
           sessions.push({
             id: sessionData.id,
             summary: sessionData.summary || 'Codex Session',
             messageCount: sessionData.messageCount || 0,
-            lastActivity: sessionData.timestamp ? new Date(sessionData.timestamp) : new Date(),
+            lastActivity,
             cwd: sessionData.cwd,
             model: sessionData.model,
             filePath: filePath,
             provider: 'codex'
           });
+          if (sessions.length >= limit) break;
         }
       } catch (error) {
         console.warn(`Could not parse Codex session file ${filePath}:`, error.message);
@@ -1226,8 +1259,7 @@ async function getCodexSessions(projectPath) {
     // Sort sessions by last activity (newest first)
     sessions.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
 
-    // Return only the first 5 sessions for performance
-    return sessions.slice(0, 5);
+    return sessions.slice(0, limit);
 
   } catch (error) {
     console.error('Error fetching Codex sessions:', error);
@@ -1236,8 +1268,9 @@ async function getCodexSessions(projectPath) {
 }
 
 // Parse a Codex session JSONL file to extract metadata
-async function parseCodexSessionFile(filePath) {
+async function parseCodexSessionFile(filePath, options = {}) {
   try {
+    const { lite = false } = options;
     const fileStream = fsSync.createReadStream(filePath);
     const rl = readline.createInterface({
       input: fileStream,
@@ -1249,43 +1282,52 @@ async function parseCodexSessionFile(filePath) {
     let lastUserMessage = null;
     let messageCount = 0;
 
-    for await (const line of rl) {
-      if (line.trim()) {
-        try {
-          const entry = JSON.parse(line);
+    try {
+      for await (const line of rl) {
+        if (line.trim()) {
+          try {
+            const entry = JSON.parse(line);
 
-          // Track timestamp
-          if (entry.timestamp) {
-            lastTimestamp = entry.timestamp;
-          }
-
-          // Extract session metadata
-          if (entry.type === 'session_meta' && entry.payload) {
-            sessionMeta = {
-              id: entry.payload.id,
-              cwd: entry.payload.cwd,
-              model: entry.payload.model || entry.payload.model_provider,
-              timestamp: entry.timestamp,
-              git: entry.payload.git
-            };
-          }
-
-          // Count messages and extract user messages for summary
-          if (entry.type === 'event_msg' && entry.payload?.type === 'user_message') {
-            messageCount++;
-            if (entry.payload.text) {
-              lastUserMessage = entry.payload.text;
+            // Track timestamp
+            if (entry.timestamp) {
+              lastTimestamp = entry.timestamp;
             }
-          }
 
-          if (entry.type === 'response_item' && entry.payload?.type === 'message') {
-            messageCount++;
-          }
+            // Extract session metadata
+            if (entry.type === 'session_meta' && entry.payload) {
+              sessionMeta = {
+                id: entry.payload.id,
+                cwd: entry.payload.cwd,
+                model: entry.payload.model || entry.payload.model_provider,
+                timestamp: entry.timestamp,
+                git: entry.payload.git
+              };
 
-        } catch (parseError) {
-          // Skip malformed lines
+              if (lite) {
+                break;
+              }
+            }
+
+            // Count messages and extract user messages for summary
+            if (!lite && entry.type === 'event_msg' && entry.payload?.type === 'user_message') {
+              messageCount++;
+              if (entry.payload.text) {
+                lastUserMessage = entry.payload.text;
+              }
+            }
+
+            if (!lite && entry.type === 'response_item' && entry.payload?.type === 'message') {
+              messageCount++;
+            }
+
+          } catch (parseError) {
+            // Skip malformed lines
+          }
         }
       }
+    } finally {
+      try { rl.close(); } catch {}
+      try { fileStream.destroy(); } catch {}
     }
 
     if (sessionMeta) {

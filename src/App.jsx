@@ -77,7 +77,7 @@ function AppContent() {
   // Triggers ChatInterface to reload messages without switching sessions
   const [externalMessageUpdate, setExternalMessageUpdate] = useState(0);
 
-  const { ws, sendMessage, messages } = useWebSocketContext();
+  const { ws, sendMessage, messages, reconnectCount, isConnected } = useWebSocketContext();
   
   // Detect if running as PWA
   const [isPWA, setIsPWA] = useState(false);
@@ -311,6 +311,18 @@ function AppContent() {
 
   // Expose fetchProjects globally for component access
   window.refreshProjects = fetchProjects;
+
+  // WebSocket Reconnection Handler: Refresh data when connection is restored
+  // This ensures data is up-to-date after network disruptions or when opening on different devices
+  useEffect(() => {
+    if (reconnectCount > 0 && isConnected) {
+      console.log('[App] WebSocket reconnected, refreshing data...');
+      // Refresh projects list
+      fetchProjects();
+      // Trigger message reload for current session
+      setExternalMessageUpdate(prev => prev + 1);
+    }
+  }, [reconnectCount, isConnected]);
 
   // Expose openSettings function globally for component access
   window.openSettings = useCallback((tab = 'tools') => {

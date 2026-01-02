@@ -5,7 +5,8 @@ const WebSocketContext = createContext({
   ws: null,
   sendMessage: () => {},
   messages: [],
-  isConnected: false
+  isConnected: false,
+  reconnectCount: 0
 });
 
 export const useWebSocketContext = () => {

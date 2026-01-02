@@ -959,9 +959,10 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                 
                 {/* Tool Result Section */}
                 {message.toolResult && (() => {
-                  // Hide tool results for Edit/Write/Bash unless there's an error
+                  // Hide tool results for Edit/Write/ApplyPatch unless there's an error
+                  // Bash output should always be shown as it contains command output
                   const shouldHideResult = !message.toolResult.isError &&
-                    (message.toolName === 'Edit' || message.toolName === 'Write' || message.toolName === 'ApplyPatch' || message.toolName === 'Bash');
+                    (message.toolName === 'Edit' || message.toolName === 'Write' || message.toolName === 'ApplyPatch');
 
                   if (shouldHideResult) {
                     return null;
@@ -1696,6 +1697,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const inputContainerRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const isLoadingSessionRef = useRef(false); // Track session loading to prevent multiple scrolls
+  const isLoadingMoreMessagesRef = useRef(false); // Track loading more (older) messages to prevent auto-scroll
   // Streaming throttle buffers
   const streamBufferRef = useRef('');
   const streamTimerRef = useRef(null);
@@ -2529,7 +2531,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const convertSessionMessages = (rawMessages) => {
     const converted = [];
     const toolResults = new Map(); // Map tool_use_id to tool result
-    
+
     // First pass: collect all tool results
     for (const msg of rawMessages) {
       if (msg.message?.role === 'user' && Array.isArray(msg.message?.content)) {
@@ -2546,32 +2548,55 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         }
       }
     }
-    
+
     // Second pass: process messages and attach tool results to tool uses
     for (const msg of rawMessages) {
+      // Handle API error messages - show them as error type in chat
+      if (msg.isApiErrorMessage === true) {
+        let errorContent = '';
+        if (Array.isArray(msg.message?.content)) {
+          for (const part of msg.message.content) {
+            if (part.type === 'text') {
+              errorContent = part.text;
+              break;
+            }
+          }
+        } else if (typeof msg.message?.content === 'string') {
+          errorContent = msg.message.content;
+        }
+        if (errorContent) {
+          converted.push({
+            type: 'error',
+            content: errorContent,
+            timestamp: msg.timestamp || new Date().toISOString()
+          });
+        }
+        continue;
+      }
+
       // Handle user messages
       if (msg.message?.role === 'user' && msg.message?.content) {
         let content = '';
         let messageType = 'user';
-        
+
         if (Array.isArray(msg.message.content)) {
           // Handle array content, but skip tool results (they're attached to tool uses)
           const textParts = [];
-          
+
           for (const part of msg.message.content) {
             if (part.type === 'text') {
               textParts.push(decodeHtmlEntities(part.text));
             }
             // Skip tool_result parts - they're handled in the first pass
           }
-          
+
           content = textParts.join('\n');
         } else if (typeof msg.message.content === 'string') {
           content = decodeHtmlEntities(msg.message.content);
         } else {
           content = decodeHtmlEntities(String(msg.message.content));
         }
-        
+
         // Skip command messages, system messages, and empty content
         const shouldSkip = !content ||
                           content.startsWith('<command-name>') ||
@@ -2593,7 +2618,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           });
         }
       }
-      
+
       // Handle thinking messages (Codex reasoning)
       else if (msg.type === 'thinking' && msg.message?.content) {
         converted.push({
@@ -2643,10 +2668,21 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
               if (typeof text === 'string') {
                 text = unescapeWithMathProtection(text);
               }
+              // Skip empty text blocks
+              if (text && text.trim()) {
+                converted.push({
+                  type: 'assistant',
+                  content: text,
+                  timestamp: msg.timestamp || new Date().toISOString()
+                });
+              }
+            } else if (part.type === 'thinking' && part.thinking) {
+              // Handle ThinkingBlock from Claude SDK (extended thinking)
               converted.push({
                 type: 'assistant',
-                content: text,
-                timestamp: msg.timestamp || new Date().toISOString()
+                content: part.thinking,
+                timestamp: msg.timestamp || new Date().toISOString(),
+                isThinking: true
               });
             } else if (part.type === 'tool_use') {
               // Get the corresponding tool result
@@ -2659,6 +2695,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                 isToolUse: true,
                 toolName: part.name,
                 toolInput: JSON.stringify(part.input),
+                toolId: part.id,
                 toolResult: toolResult ? {
                   content: typeof toolResult.content === 'string' ? toolResult.content : JSON.stringify(toolResult.content),
                   isError: toolResult.isError,
@@ -2673,12 +2710,32 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           // Unescape with math formula protection
           let text = msg.message.content;
           text = unescapeWithMathProtection(text);
-          converted.push({
-            type: 'assistant',
-            content: text,
-            timestamp: msg.timestamp || new Date().toISOString()
-          });
+          if (text && text.trim()) {
+            converted.push({
+              type: 'assistant',
+              content: text,
+              timestamp: msg.timestamp || new Date().toISOString()
+            });
+          }
         }
+      }
+
+      // Handle assistant message errors (from SDK AssistantMessageError)
+      if (msg.message?.role === 'assistant' && msg.message?.error) {
+        const errorMessages = {
+          'authentication_failed': 'Authentication failed. Please check your API key.',
+          'billing_error': 'Billing error. Please check your account status.',
+          'rate_limit': 'Rate limit exceeded. Please wait and try again.',
+          'invalid_request': 'Invalid request. Please check your input.',
+          'server_error': 'Server error. Please try again later.',
+          'unknown': 'An unknown error occurred.'
+        };
+        const errorContent = errorMessages[msg.message.error] || `Error: ${msg.message.error}`;
+        converted.push({
+          type: 'error',
+          content: errorContent,
+          timestamp: msg.timestamp || new Date().toISOString()
+        });
       }
     }
     
@@ -2716,31 +2773,41 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       const container = scrollContainerRef.current;
       const nearBottom = isNearBottom();
       setIsUserScrolledUp(!nearBottom);
-      
+
       // Check if we should load more messages (scrolled near top)
       const scrolledNearTop = container.scrollTop < 100;
       const provider = localStorage.getItem('selected-provider') || 'claude';
-      
-      if (scrolledNearTop && hasMoreMessages && !isLoadingMoreMessages && selectedSession && selectedProject && provider !== 'cursor') {
+
+      if (scrolledNearTop && hasMoreMessages && !isLoadingMoreMessages && !isLoadingMoreMessagesRef.current && selectedSession && selectedProject && provider !== 'cursor') {
+        // Mark that we're loading more messages to prevent auto-scroll
+        isLoadingMoreMessagesRef.current = true;
+
         // Save current scroll position
         const previousScrollHeight = container.scrollHeight;
         const previousScrollTop = container.scrollTop;
-        
+
         // Load more messages
         const moreMessages = await loadSessionMessages(selectedProject.name, selectedSession.id, true, selectedSession.__provider || 'claude');
-        
+
         if (moreMessages.length > 0) {
           // Prepend new messages to the existing ones
           setSessionMessages(prev => [...moreMessages, ...prev]);
-          
+
           // Restore scroll position after DOM update
-          setTimeout(() => {
+          requestAnimationFrame(() => {
             if (scrollContainerRef.current) {
               const newScrollHeight = scrollContainerRef.current.scrollHeight;
               const scrollDiff = newScrollHeight - previousScrollHeight;
               scrollContainerRef.current.scrollTop = previousScrollTop + scrollDiff;
             }
-          }, 0);
+            // Reset the loading more flag after scroll position is restored
+            setTimeout(() => {
+              isLoadingMoreMessagesRef.current = false;
+            }, 100);
+          });
+        } else {
+          // No more messages, reset flag
+          isLoadingMoreMessagesRef.current = false;
         }
       }
     }
@@ -3736,7 +3803,8 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
   useEffect(() => {
     // Auto-scroll to bottom when new messages arrive
-    if (scrollContainerRef.current && chatMessages.length > 0) {
+    // Skip if we're loading more (older) messages to preserve scroll position
+    if (scrollContainerRef.current && chatMessages.length > 0 && !isLoadingMoreMessagesRef.current) {
       if (autoScrollToBottom) {
         // If auto-scroll is enabled, always scroll to bottom unless user has manually scrolled up
         if (!isUserScrolledUp) {
@@ -3760,6 +3828,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
 
   // Scroll to bottom when messages first load after session switch
   useEffect(() => {
+    // Skip if we're loading more (older) messages
+    if (isLoadingMoreMessagesRef.current) return;
+
     if (scrollContainerRef.current && chatMessages.length > 0 && !isLoadingSessionRef.current) {
       // Only scroll if we're not in the middle of loading a session
       // This prevents the "double scroll" effect during session switching
