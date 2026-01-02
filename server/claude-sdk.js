@@ -438,14 +438,16 @@ async function queryClaudeSDK(command, options = {}, ws) {
     await cleanupTempFiles(tempImagePaths, tempDir);
 
     // Send completion event
-    console.log('Streaming complete, sending claude-complete event');
-    ws.send({
+    console.log('Streaming complete, sending claude-complete event for session:', capturedSessionId);
+    console.log('WebSocket state:', ws.ws?.readyState);
+    const completionMessage = {
       type: 'claude-complete',
       sessionId: capturedSessionId,
       exitCode: 0,
       isNewSession: !sessionId && !!command
-    });
-    console.log('claude-complete event sent');
+    };
+    ws.send(completionMessage);
+    console.log('claude-complete event sent:', JSON.stringify(completionMessage));
 
   } catch (error) {
     console.error('SDK query error:', error);

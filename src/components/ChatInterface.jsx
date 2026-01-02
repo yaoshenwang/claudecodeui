@@ -1679,6 +1679,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   });
   const [isLoading, setIsLoading] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState(selectedSession?.id || null);
+  const isLoadingRef = useRef(false); // Ref to track loading state for use in effects
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [sessionMessages, setSessionMessages] = useState([]);
   const [isLoadingSessionMessages, setIsLoadingSessionMessages] = useState(false);
@@ -1698,6 +1699,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
   const scrollContainerRef = useRef(null);
   const isLoadingSessionRef = useRef(false); // Track session loading to prevent multiple scrolls
   const isLoadingMoreMessagesRef = useRef(false); // Track loading more (older) messages to prevent auto-scroll
+  const currentSessionIdRef = useRef(null); // Ref to track current session ID for use in effects
   // Streaming throttle buffers
   const streamBufferRef = useRef('');
   const streamTimerRef = useRef(null);
@@ -2995,6 +2997,16 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     }
   }, [selectedProject?.name]);
 
+  // Sync currentSessionId and isLoading to refs for use in effects
+  // This prevents stale closure issues in the WebSocket message handler
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    isLoadingRef.current = isLoading;
+  }, [isLoading]);
+
   // Track processing state: notify parent when isLoading becomes true
   // Note: onSessionNotProcessing is called directly in completion message handlers
   useEffect(() => {
@@ -3437,13 +3449,26 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           
         case 'claude-complete':
           // Get session ID from message or fall back to current session
-          const completedSessionId = latestMessage.sessionId || currentSessionId || sessionStorage.getItem('pendingSessionId');
+          // Use ref to get the latest currentSessionId value (avoids stale closure)
+          const currentSessId = currentSessionIdRef.current;
+          const completedSessionId = latestMessage.sessionId || currentSessId || sessionStorage.getItem('pendingSessionId');
+          console.log('📍 claude-complete received:', {
+            messageSessionId: latestMessage.sessionId,
+            currentSessionId: currentSessId,
+            pendingSessionId: sessionStorage.getItem('pendingSessionId'),
+            completedSessionId,
+            exitCode: latestMessage.exitCode,
+            isLoading: isLoadingRef.current
+          });
 
           // Update UI state if this is the current session OR if we don't have a session ID yet (new session)
-          if (completedSessionId === currentSessionId || !currentSessionId) {
+          if (completedSessionId === currentSessId || !currentSessId) {
+            console.log('✅ Updating UI state: setIsLoading(false)');
             setIsLoading(false);
             setCanAbortSession(false);
             setClaudeStatus(null);
+          } else {
+            console.log('⏭️ Skipping UI update - session mismatch');
           }
 
           // Always mark the completed session as inactive and not processing
@@ -3458,7 +3483,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           
           // If we have a pending session ID and the conversation completed successfully, use it
           const pendingSessionId = sessionStorage.getItem('pendingSessionId');
-          if (pendingSessionId && !currentSessionId && latestMessage.exitCode === 0) {
+          if (pendingSessionId && !currentSessId && latestMessage.exitCode === 0) {
                 setCurrentSessionId(pendingSessionId);
             sessionStorage.removeItem('pendingSessionId');
 
