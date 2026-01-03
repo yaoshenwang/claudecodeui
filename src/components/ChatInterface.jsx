@@ -38,6 +38,20 @@ import CommandMenu from './CommandMenu';
 import { CLAUDE_MODELS, CURSOR_MODELS, CODEX_MODELS } from '../../shared/modelConstants';
 
 
+// Generate unique message ID for stable React keys
+let messageIdCounter = 0;
+function generateMessageId() {
+  return `msg_${Date.now()}_${++messageIdCounter}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Helper function to create a message with a unique ID
+function createMessage(props) {
+  return {
+    ...props,
+    id: props.id || generateMessageId(),
+  };
+}
+
 // Helper function to decode HTML entities in text
 function decodeHtmlEntities(text) {
   if (!text) return text;
@@ -356,7 +370,7 @@ const markdownComponents = {
 };
 
 // Memoized message component to prevent unnecessary re-renders
-const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFileOpen, onShowSettings, autoExpandTools, showRawParameters, showThinking, selectedProject }) => {
+const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFileOpen, onShowSettings, autoExpandTools, showRawParameters, showThinking, selectedProject, selectedProvider }) => {
   const isGrouped = prevMessage && prevMessage.type === message.type &&
                    ((prevMessage.type === 'assistant') ||
                     (prevMessage.type === 'user') ||
@@ -364,9 +378,20 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                     (prevMessage.type === 'error'));
   const messageRef = React.useRef(null);
   const [isExpanded, setIsExpanded] = React.useState(false);
+
+  // Cache provider info to avoid repeated localStorage reads
+  const providerInfo = React.useMemo(() => {
+    const provider = selectedProvider || 'claude';
+    return {
+      isCursor: provider === 'cursor',
+      isCodex: provider === 'codex',
+      name: provider === 'cursor' ? 'Cursor' : provider === 'codex' ? 'Codex' : 'Claude'
+    };
+  }, [selectedProvider]);
+
   React.useEffect(() => {
     if (!autoExpandTools || !messageRef.current || !message.isToolUse) return;
-    
+
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
@@ -382,9 +407,9 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
       },
       { threshold: 0.1 }
     );
-    
+
     observer.observe(messageRef.current);
-    
+
     return () => {
       if (messageRef.current) {
         observer.unobserve(messageRef.current);
@@ -442,9 +467,9 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                 </div>
               ) : (
                 <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 p-1">
-                  {(localStorage.getItem('selected-provider') || 'claude') === 'cursor' ? (
+                  {providerInfo.isCursor ? (
                     <CursorLogo className="w-full h-full" />
-                  ) : (localStorage.getItem('selected-provider') || 'claude') === 'codex' ? (
+                  ) : providerInfo.isCodex ? (
                     <CodexLogo className="w-full h-full" />
                   ) : (
                     <ClaudeLogo className="w-full h-full" />
@@ -452,7 +477,7 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
                 </div>
               )}
               <div className="text-sm font-medium text-gray-900 dark:text-white">
-                {message.type === 'error' ? 'Error' : message.type === 'tool' ? 'Tool' : ((localStorage.getItem('selected-provider') || 'claude') === 'cursor' ? 'Cursor' : (localStorage.getItem('selected-provider') || 'claude') === 'codex' ? 'Codex' : 'Claude')}
+                {message.type === 'error' ? 'Error' : message.type === 'tool' ? 'Tool' : providerInfo.name}
               </div>
             </div>
           )}
@@ -1615,6 +1640,35 @@ const MessageComponent = memo(({ message, index, prevMessage, createDiff, onFile
       )}
     </div>
   );
+}, (prevProps, nextProps) => {
+  // Custom comparison for memo to prevent unnecessary re-renders
+  // Only re-render if message content, tool result, or display settings changed
+  if (prevProps.message !== nextProps.message) {
+    // Deep compare message properties that affect rendering
+    const prevMsg = prevProps.message;
+    const nextMsg = nextProps.message;
+    if (prevMsg.content !== nextMsg.content ||
+        prevMsg.type !== nextMsg.type ||
+        prevMsg.isToolUse !== nextMsg.isToolUse ||
+        prevMsg.toolResult?.content !== nextMsg.toolResult?.content ||
+        prevMsg.isStreaming !== nextMsg.isStreaming) {
+      return false; // Need to re-render
+    }
+  }
+  // Re-render if display settings changed
+  if (prevProps.autoExpandTools !== nextProps.autoExpandTools ||
+      prevProps.showRawParameters !== nextProps.showRawParameters ||
+      prevProps.showThinking !== nextProps.showThinking ||
+      prevProps.selectedProvider !== nextProps.selectedProvider) {
+    return false;
+  }
+  // Check if grouping changed (prevMessage comparison)
+  const prevGrouped = prevProps.prevMessage?.type === prevProps.message.type;
+  const nextGrouped = nextProps.prevMessage?.type === nextProps.message.type;
+  if (prevGrouped !== nextGrouped) {
+    return false;
+  }
+  return true; // Props are equal, skip re-render
 });
 
 // ImageAttachment component for displaying image previews
@@ -3256,22 +3310,30 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             if (cleaned.trim()) {
               streamBufferRef.current += (streamBufferRef.current ? `\n${cleaned}` : cleaned);
               if (!streamTimerRef.current) {
-                streamTimerRef.current = setTimeout(() => {
-                  const chunk = streamBufferRef.current;
-                  streamBufferRef.current = '';
-                  streamTimerRef.current = null;
-                  if (!chunk) return;
-                  setChatMessages(prev => {
-                    const updated = [...prev];
-                    const last = updated[updated.length - 1];
-                    if (last && last.type === 'assistant' && !last.isToolUse && last.isStreaming) {
-                      last.content = last.content ? `${last.content}\n${chunk}` : chunk;
-                    } else {
-                      updated.push({ type: 'assistant', content: chunk, timestamp: new Date(), isStreaming: true });
-                    }
-                    return updated;
-                  });
-                }, 100);
+                // Use requestAnimationFrame for smoother updates aligned with screen refresh
+                streamTimerRef.current = requestAnimationFrame(() => {
+                  // Add a small delay to batch multiple rapid updates
+                  setTimeout(() => {
+                    const chunk = streamBufferRef.current;
+                    streamBufferRef.current = '';
+                    streamTimerRef.current = null;
+                    if (!chunk) return;
+                    setChatMessages(prev => {
+                      const updated = [...prev];
+                      const last = updated[updated.length - 1];
+                      if (last && last.type === 'assistant' && !last.isToolUse && last.isStreaming) {
+                        // Mutate in place to avoid creating new object for streaming updates
+                        updated[updated.length - 1] = {
+                          ...last,
+                          content: last.content ? `${last.content}\n${chunk}` : chunk
+                        };
+                      } else {
+                        updated.push({ type: 'assistant', content: chunk, timestamp: new Date(), isStreaming: true, id: generateMessageId() });
+                      }
+                      return updated;
+                    });
+                  }, 50); // 50ms batching delay for smoother streaming
+                });
               }
             }
           }
@@ -3815,6 +3877,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
     return chatMessages.slice(-visibleMessageCount);
   }, [chatMessages, visibleMessageCount]);
 
+  // Cache provider to avoid repeated localStorage reads in MessageComponent
+  const cachedProvider = useMemo(() => provider, [provider]);
+
   // Capture scroll position before render when auto-scroll is disabled
   useEffect(() => {
     if (!autoScrollToBottom && scrollContainerRef.current) {
@@ -3833,7 +3898,10 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       if (autoScrollToBottom) {
         // If auto-scroll is enabled, always scroll to bottom unless user has manually scrolled up
         if (!isUserScrolledUp) {
-          setTimeout(() => scrollToBottom(), 50); // Small delay to ensure DOM is updated
+          // Use requestAnimationFrame for smoother scrolling
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => scrollToBottom());
+          });
         }
       } else {
         // When auto-scroll is disabled, preserve the visual position
@@ -3861,10 +3929,12 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
       // This prevents the "double scroll" effect during session switching
       // Reset scroll state when switching sessions
       setIsUserScrolledUp(false);
-      setTimeout(() => {
-        scrollToBottom();
-        // After scrolling, the scroll event handler will naturally set isUserScrolledUp based on position
-      }, 200); // Delay to ensure full rendering
+      // Use double requestAnimationFrame to ensure DOM is fully rendered
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          scrollToBottom();
+        });
+      });
     }
   }, [selectedSession?.id, selectedProject?.name]); // Only trigger when session/project changes
 
@@ -4509,9 +4579,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         className="flex-1 overflow-y-auto overflow-x-hidden px-0 py-3 sm:p-4 space-y-3 sm:space-y-4 relative"
       >
         {isLoadingSessionMessages && chatMessages.length === 0 ? (
-          <div className="text-center text-gray-500 dark:text-gray-400 mt-8">
+          <div className="text-center text-gray-500 dark:text-gray-400 mt-8 loading-message">
             <div className="flex items-center justify-center space-x-2">
-              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
+              <div className="loading-spinner rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
               <p>Loading session messages...</p>
             </div>
           </div>
@@ -4718,9 +4788,9 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
           <>
             {/* Loading indicator for older messages */}
             {isLoadingMoreMessages && (
-              <div className="text-center text-gray-500 dark:text-gray-400 py-3">
+              <div className="text-center text-gray-500 dark:text-gray-400 py-3 loading-message">
                 <div className="flex items-center justify-center space-x-2">
-                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
+                  <div className="loading-spinner rounded-full h-4 w-4 border-b-2 border-gray-400"></div>
                   <p className="text-sm">Loading older messages...</p>
                 </div>
               </div>
@@ -4753,10 +4823,12 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
             
             {visibleMessages.map((message, index) => {
               const prevMessage = index > 0 ? visibleMessages[index - 1] : null;
-              
+              // Use message.id if available, otherwise create a stable key from timestamp and index
+              const messageKey = message.id || `${message.timestamp?.getTime?.() || message.timestamp || Date.now()}-${index}`;
+
               return (
                 <MessageComponent
-                  key={index}
+                  key={messageKey}
                   message={message}
                   index={index}
                   prevMessage={prevMessage}
@@ -4767,6 +4839,7 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
                   showRawParameters={showRawParameters}
                   showThinking={showThinking}
                   selectedProject={selectedProject}
+                  selectedProvider={cachedProvider}
                 />
               );
             })}
@@ -4774,26 +4847,28 @@ function ChatInterface({ selectedProject, selectedSession, ws, sendMessage, mess
         )}
         
         {isLoading && (
-          <div className="chat-message assistant">
+          <div className="chat-message assistant loading-message" style={{ animation: 'none' }}>
             <div className="w-full">
               <div className="flex items-center space-x-3 mb-2">
                 <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-sm flex-shrink-0 p-1 bg-transparent">
-                  {(localStorage.getItem('selected-provider') || 'claude') === 'cursor' ? (
+                  {cachedProvider === 'cursor' ? (
                     <CursorLogo className="w-full h-full" />
-                  ) : (localStorage.getItem('selected-provider') || 'claude') === 'codex' ? (
+                  ) : cachedProvider === 'codex' ? (
                     <CodexLogo className="w-full h-full" />
                   ) : (
                     <ClaudeLogo className="w-full h-full" />
                   )}
                 </div>
-                <div className="text-sm font-medium text-gray-900 dark:text-white">{(localStorage.getItem('selected-provider') || 'claude') === 'cursor' ? 'Cursor' : (localStorage.getItem('selected-provider') || 'claude') === 'codex' ? 'Codex' : 'Claude'}</div>
+                <div className="text-sm font-medium text-gray-900 dark:text-white">
+                  {cachedProvider === 'cursor' ? 'Cursor' : cachedProvider === 'codex' ? 'Codex' : 'Claude'}
+                </div>
                 {/* Abort button removed - functionality not yet implemented at backend */}
               </div>
               <div className="w-full text-sm text-gray-500 dark:text-gray-400 pl-3 sm:pl-0">
                 <div className="flex items-center space-x-1">
-                  <div className="animate-pulse">●</div>
-                  <div className="animate-pulse" style={{ animationDelay: '0.2s' }}>●</div>
-                  <div className="animate-pulse" style={{ animationDelay: '0.4s' }}>●</div>
+                  <span className="thinking-dot">●</span>
+                  <span className="thinking-dot">●</span>
+                  <span className="thinking-dot">●</span>
                   <span className="ml-2">Thinking...</span>
                 </div>
               </div>

@@ -252,7 +252,35 @@
     transition: opacity 300ms ease-in-out,
                 transform 300ms cubic-bezier(0.4, 0, 0.2, 1);
   }
-  
+
+  /* Smooth message appearance animation */
+  .chat-message {
+    animation: messageAppear 200ms ease-out;
+    will-change: opacity, transform;
+  }
+
+  @keyframes messageAppear {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* Prevent animation on grouped messages for smoother streaming */
+  .chat-message.grouped {
+    animation: none;
+  }
+
+  /* Smooth content updates without flashing */
+  .chat-message .prose,
+  .chat-message .text-sm {
+    transition: none;
+  }
+
   /* Height transitions for expanding elements */
   .height-transition {
     transition: height 200ms ease-in-out,
@@ -718,11 +746,11 @@
       transform: rotate(360deg);
     }
   }
-  
+
   .animate-spin {
     animation: spin 1s linear infinite;
   }
-  
+
   /* Force hardware acceleration for smoother animation on mobile */
   .loading-spinner {
     animation: spin 1s linear infinite;
@@ -731,6 +759,49 @@
     -webkit-transform: translateZ(0);
     backface-visibility: hidden;
     -webkit-backface-visibility: hidden;
+  }
+
+  /* Smoother thinking dots animation */
+  @keyframes thinkingPulse {
+    0%, 100% {
+      opacity: 0.3;
+      transform: scale(0.8);
+    }
+    50% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  .thinking-dot {
+    animation: thinkingPulse 1.4s ease-in-out infinite;
+    will-change: opacity, transform;
+  }
+
+  .thinking-dot:nth-child(1) {
+    animation-delay: 0s;
+  }
+
+  .thinking-dot:nth-child(2) {
+    animation-delay: 0.2s;
+  }
+
+  .thinking-dot:nth-child(3) {
+    animation-delay: 0.4s;
+  }
+
+  /* Loading message fade-in */
+  .loading-message {
+    animation: fadeIn 200ms ease-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
   }
   
   /* Improved textarea styling */
